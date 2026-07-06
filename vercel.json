@@ -1,0 +1,13 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "app/api/reports/generate/route.ts": {
+      "maxDuration": 60,
+      "memory": 1024
+    },
+    "app/api/reports/[id]/pdf/route.ts": {
+      "maxDuration": 60,
+      "memory": 1024
+    }
+  }
+}
