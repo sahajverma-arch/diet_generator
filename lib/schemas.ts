@@ -1,120 +1,122 @@
 import { z } from "zod";
 
 /**
- * The canonical structured shape of a generated diet report.
+ * The canonical structured shape of a generated **Weekly Diet Macro Report**.
  *
  * This single schema is the contract for the whole pipeline:
- *   1. It is handed to OpenAI as a Structured Output json_schema, so the model
- *      is *guaranteed* to return matching JSON.
- *   2. It is stored verbatim in Postgres (`reports.report_data`).
- *   3. It drives the multi-page PDF renderer.
+ *   1. It is handed to the model as a Structured Output json_schema, so the
+ *      reply is *guaranteed* to match this shape.
+ *   2. It is stored verbatim in Postgres (`reports.report_data`, a schemaless
+ *      jsonb column — no migration needed when this shape changes).
+ *   3. It drives the PDF renderer and the on-screen report view.
  *
- * OpenAI Structured Outputs require every property to be "required", so we use
- * `.nullable()` (never `.optional()`) for values that may be absent, and allow
- * empty arrays for list-like sections.
+ * The model returns only the raw per-meal data it can read/estimate from the
+ * source plan. All *derived* numbers — daily totals, each meal's calorie share,
+ * the weekly summary and the weekly average — are computed in code
+ * (`lib/report-macros.ts`) rather than trusted to the model's arithmetic.
+ *
+ * Structured Outputs require every property to be "required", so absent values
+ * are represented with `''` / empty arrays rather than `.optional()`.
  */
 
-const MicronutrientStatus = z.enum([
-  "adequate",
-  "monitor",
-  "increase",
-  "supplement",
-]);
+/** A single meal within a day. */
+export const MealEntrySchema = z.object({
+  time: z
+    .string()
+    .describe("Meal time in 24-hour 'HH:MM' form if known (e.g. '06:00'), else ''."),
+  name: z
+    .string()
+    .describe("Meal label as written, e.g. 'Meal 1', 'Breakfast', 'Pre-workout'."),
+  foods: z
+    .string()
+    .describe("The foods / description for this meal on a single line, as written in the plan."),
+  calories: z
+    .number()
+    .describe("Estimated calories (kcal) for this meal, based on standard portion sizes."),
+  protein_g: z.number().describe("Estimated protein in grams for this meal."),
+  carbs_g: z.number().describe("Estimated carbohydrates in grams for this meal."),
+  fats_g: z.number().describe("Estimated fat in grams for this meal."),
+});
+
+/** A single day of the plan. */
+const DayEntrySchema = z.object({
+  label: z
+    .string()
+    .describe(
+      "Day heading with date if present, e.g. 'Monday, 29 Jun'. If the source has no dates, use 'Day 1', 'Day 2', …",
+    ),
+  meals: z
+    .array(MealEntrySchema)
+    .describe("Meals for this day in chronological order. May be empty if the day lists none."),
+});
 
 export const DietReportSchema = z.object({
   client: z.object({
     name: z.string().describe("Client's full name if present, else 'Client'."),
-    goal: z.string().describe("Primary goal, e.g. 'Fat loss', 'Muscle gain'."),
-    plan_duration: z.string().describe("Plan length, e.g. '4 weeks'. '' if unknown."),
-    notes: z.string().describe("Any client-specific context. '' if none."),
-  }),
-  overview: z.object({
-    summary: z.string().describe("2–4 sentence executive summary of the plan."),
-    dietary_pattern: z
+    plan_name: z
       .string()
-      .describe("e.g. 'High-protein, moderate-carb, calorie-controlled'."),
-    key_highlights: z
-      .array(z.string())
-      .describe("3–6 short bullet points of the most important takeaways."),
+      .describe("Plan name, e.g. 'Leanr Advance - 6 Months'. '' if unknown."),
+    diet_preference: z
+      .string()
+      .describe(
+        "Dietary preference, e.g. 'Non-Vegetarian', 'Vegetarian', 'Vegan', 'Eggetarian'. '' if unknown.",
+      ),
+    medical_condition: z
+      .string()
+      .describe("Relevant medical condition / focus, e.g. 'Cholesterol', 'Diabetes', 'PCOS'. '' if none."),
+    period_label: z
+      .string()
+      .describe("Date range the plan covers, e.g. '29 Jun – 05 Jul 2025'. '' if unknown."),
   }),
-  calories: z.object({
-    daily_target_kcal: z.number().describe("Target daily energy intake in kcal."),
-    maintenance_kcal: z.number().nullable().describe("Estimated maintenance kcal, or null."),
-    deficit_or_surplus_kcal: z
-      .number()
-      .nullable()
-      .describe("Negative = deficit, positive = surplus, or null."),
-    notes: z.string().describe("Short note on the calorie strategy."),
-  }),
-  macros: z.object({
-    protein_g: z.number(),
-    carbs_g: z.number(),
-    fats_g: z.number(),
-    fiber_g: z.number().nullable(),
-    protein_pct: z.number().describe("Percent of total calories from protein (0–100)."),
-    carbs_pct: z.number().describe("Percent of total calories from carbs (0–100)."),
-    fats_pct: z.number().describe("Percent of total calories from fats (0–100)."),
-    notes: z.string(),
-  }),
-  micronutrients: z
-    .array(
-      z.object({
-        name: z.string().describe("e.g. 'Vitamin D', 'Iron', 'Omega-3'."),
-        amount: z.string().describe("Amount with unit, e.g. '1000 IU', '18 mg'. '' if N/A."),
-        status: MicronutrientStatus.nullable(),
-        note: z.string(),
-      }),
-    )
-    .describe("Key micronutrients to track. May be empty."),
-  meals: z
-    .array(
-      z.object({
-        name: z.string().describe("e.g. 'Breakfast', 'Pre-workout'."),
-        time: z.string().describe("Suggested time, e.g. '8:00 AM'. '' if unspecified."),
-        items: z.array(z.string()).describe("Food items / description lines."),
-        approx_kcal: z.number().nullable(),
-      }),
-    )
-    .describe("Meal-by-meal breakdown extracted from the plan. May be empty."),
-  hydration: z.object({
-    daily_water_liters: z.number().nullable(),
-    recommendations: z.array(z.string()),
-  }),
-  workout: z.object({
-    focus: z.string().describe("Overall training focus, e.g. 'Strength + conditioning'."),
-    weekly_split: z
-      .array(
-        z.object({
-          day: z.string().describe("e.g. 'Monday' or 'Day 1'."),
-          focus: z.string().describe("e.g. 'Upper body push'."),
-          details: z.string().describe("Brief description of the session."),
-        }),
-      )
-      .describe("Weekly training split. Infer a sensible split if none is given."),
-    recommendations: z.array(z.string()),
-  }),
-  recovery: z.object({
-    sleep_hours: z.string().describe("Recommended sleep, e.g. '7–8 hours'."),
-    recommendations: z.array(z.string()),
-  }),
-  supplements: z
-    .array(
-      z.object({
-        name: z.string(),
-        dosage: z.string(),
-        timing: z.string(),
-        purpose: z.string(),
-      }),
-    )
-    .describe("Supplement suggestions. May be empty. Never prescribe medication."),
-  disclaimers: z
-    .array(z.string())
-    .describe("Safety disclaimers. Always include at least a general one."),
+  days: z
+    .array(DayEntrySchema)
+    .describe(
+      "One entry per day that ACTUALLY appears in the source document, in order. " +
+        "Do NOT invent days that are not in the source. If the plan describes a single " +
+        "generic day, return just that one day.",
+    ),
+  notes: z
+    .string()
+    .describe("Short optional note, e.g. flagging that macros are estimated. '' if none."),
 });
 
 export type DietReport = z.infer<typeof DietReportSchema>;
-export type Micronutrient = DietReport["micronutrients"][number];
-export type MealPlanEntry = DietReport["meals"][number];
+export type DietDay = DietReport["days"][number];
+export type DietMeal = DietDay["meals"][number];
+
+/**
+ * Shape for a targeted "repair" re-extraction. When the first pass returns a day
+ * with fewer meals than the rest (the small model sometimes skips the
+ * afternoon/evening meals), we re-ask for just those days and merge the result.
+ *
+ * This is deliberately TOLERANT (unlike the strict report schema): the repair is
+ * a single fail-fast call with no self-correction loop, and the small model
+ * sometimes omits a field (e.g. `carbs_g`). Rather than discard an entire
+ * recovered day over one missing number, we default missing/invalid fields — a
+ * meal with a defaulted 0 is far better than losing it. `.catch()` also covers
+ * missing keys (undefined → validation error → fallback).
+ */
+const LenientMealSchema = z.object({
+  time: z.string().catch(""),
+  name: z.string().catch(""),
+  foods: z.string().catch(""),
+  calories: z.coerce.number().catch(0),
+  protein_g: z.coerce.number().catch(0),
+  carbs_g: z.coerce.number().catch(0),
+  fats_g: z.coerce.number().catch(0),
+});
+
+export const DaysPatchSchema = z.object({
+  days: z
+    .array(
+      z.object({
+        label: z.string().catch(""),
+        meals: z.array(LenientMealSchema).catch([]),
+      }),
+    )
+    .catch([]),
+});
+export type DaysPatch = z.infer<typeof DaysPatchSchema>;
 
 /** Input validation for the generate endpoint (non-file fields). */
 export const GenerateInputSchema = z.object({
