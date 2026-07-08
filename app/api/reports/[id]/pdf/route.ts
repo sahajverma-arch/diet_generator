@@ -26,12 +26,18 @@ export async function GET(
     return NextResponse.json({ error: "Report not found." }, { status: 404 });
   }
 
+  const requestUrl = new URL(request.url);
+  // `?refresh=1` re-renders from the stored report_data instead of serving the
+  // cached PDF — handy for seeing renderer/layout changes on an existing report
+  // without re-uploading. Falls back to a live render if no stored PDF exists.
+  const forceRefresh = requestUrl.searchParams.get("refresh") === "1";
+
   try {
     let pdf: Buffer;
-    if (report.final_pdf_path) {
+    if (report.final_pdf_path && !forceRefresh) {
       pdf = await downloadObject(report.final_pdf_path);
     } else if (report.report_data) {
-      // Fallback: regenerate on demand if the stored PDF is missing.
+      // Regenerate on demand (stored PDF missing, or a refresh was requested).
       pdf = await renderReportPdf({ report: report.report_data, reportId: report.id });
     } else {
       return NextResponse.json(
@@ -40,7 +46,7 @@ export async function GET(
       );
     }
 
-    const download = new URL(request.url).searchParams.get("download") === "1";
+    const download = requestUrl.searchParams.get("download") === "1";
     const filename = `leanr-diet-report-${slugify(report.client_name) || "report"}.pdf`;
 
     return new NextResponse(new Uint8Array(pdf), {

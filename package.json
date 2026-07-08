@@ -2,11 +2,11 @@
   "name": "leanr-diet-report-generator",
   "version": "1.0.0",
   "private": true,
-  "description": "AI-powered diet report generator — upload a diet PDF, extract & analyze with GPT, render a premium branded PDF report.",
+  "description": "AI-powered diet report generator \u2014 upload a diet PDF, extract & analyze with GPT, render a premium branded PDF report.",
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
+    "dev": "node init && next dev",
+    "build": "node init && next build",
+    "start": "node init && next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit"
   },
